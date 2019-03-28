@@ -5,7 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.io.FileUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import software.kloud.classery.utils.FileHasher;
+import software.kloud.common.file.hash.FileHasher;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -200,7 +200,7 @@ public class JarFileScanner {
     }
 
     /**
-     * Unpacks a jar into a directory under the KMS-Store (see {@link LocalDiskStorage}). Returns directory for further processing
+     * Unpacks a jar into a directory. Returns directory for further processing
      * Runs in its own future
      *
      * @param jarfile JarFile to unpack

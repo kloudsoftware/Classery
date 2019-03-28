@@ -1,22 +1,45 @@
-plugins {
-    id 'java'
-}
+apply plugin: 'maven'
+apply plugin: 'maven-publish'
+apply plugin: 'java'
 
 group 'software.kloud'
-version '1.0'
+version '1.1'
 
 sourceCompatibility = 11
 
 repositories {
     mavenCentral()
+    maven {
+        url 'https://nexus.kloud.software/repository/maven-releases/'
+    }
 }
 
 dependencies {
     implementation group: 'org.slf4j', name: 'slf4j-api', version: '1.7.26'
     implementation group: 'com.fasterxml.jackson.core', name: 'jackson-databind', version: '2.9.8'
     implementation group: 'org.apache.logging.log4j', name: 'log4j-core', version: '2.11.2'
+    implementation group: 'software.kloud', name: 'common', version: '1.0'
     implementation group: 'commons-io', name: 'commons-io', version: '2.6'
-    implementation group: 'commons-codec', name: 'commons-codec', version: '1.12'
+
 
     testCompile group: 'junit', name: 'junit', version: '4.12'
 }
+
+uploadArchives {
+    repositories {
+        mavenDeployer {
+            repository(url: "https://nexus.kloud.software/repository/maven-releases/") {
+                if (System.getenv('NEXUS_USERNAME') != null) {
+                    println "uploading archives from build job"
+                    authentication(userName: System.getenv('NEXUS_USERNAME'), password: System.getenv('NEXUS_PASS'))
+                } else {
+                    authentication(userName: "${project.property('kloudnexus.user')}", password: "${project.property('kloudnexus.password')}")
+                }
+            }
+            pom.version = "$version"
+            pom.artifactId = "$rootProject.name"
+            pom.groupId = "software.kloud"
+        }
+    }
+}
+
