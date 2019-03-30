@@ -28,7 +28,6 @@ public class JarFileScanner {
     private final List<File> pluginDirectories;
     private final CompletionService<JarStateHolder> completionService;
     private Map<File, Set<JarStateHolder>> jarFileTmpMap;
-    private Map<File, FileHasher> jarFileHasherMap;
     private boolean hasScanned = false;
     private Supplier<File> baseDirectory;
     private boolean initialized = false;
@@ -42,15 +41,14 @@ public class JarFileScanner {
     private AtomicInteger debugCountOfSkippedJarEntries = new AtomicInteger(0);
     private AtomicInteger debugCountOfSkippedJarFiles = new AtomicInteger(0);
 
-    public JarFileScanner(File baseDir, int threadCount) throws IOException {
+    private JarFileScanner(File baseDir, int threadCount) {
         this.jarFileTmpMap = new HashMap<>();
-        this.jarFileHasherMap = new HashMap<>();
         this.pluginDirectories = new ArrayList<>();
         this.completionService = new ExecutorCompletionService<>(Executors.newFixedThreadPool(threadCount));
         this.baseDirectory = () -> baseDir;
     }
 
-    public JarFileScanner(File baseDir) throws IOException {
+    public JarFileScanner(File baseDir) {
         this(baseDir, DEFAULT_THREAD_COUNT);
     }
 
@@ -95,6 +93,7 @@ public class JarFileScanner {
         pluginDirectories.add(directory);
     }
 
+    @SuppressWarnings("unused")
     public void setUnpackingBaseDir(File baseDir) {
         this.baseDirectory = () -> baseDir;
     }
@@ -126,61 +125,7 @@ public class JarFileScanner {
         var res = new HashSet<JarStateHolder>();
         int futuresSpawned = 0;
         for (File zippedJarFile : jarFiles) {
-            if (!zippedJarFile.isFile()) continue;
-
-            var hasher = new FileHasher(zippedJarFile);
-            var hash = hasher.hashMD5();
-
-            var hasAlreadyScannedByName = this.getAllScannedJars()
-                    .anyMatch(j -> j.getZippedJarFile().getName().equals(zippedJarFile.getName()));
-
-            var hasAlreadyScannedByHash = this.getAllScannedJars()
-                    .filter(j -> j.getJarFileHash() != null)
-                    .anyMatch(j -> j.getJarFileHash().equals(hash));
-
-            if (hasAlreadyScannedByHash && hasAlreadyScannedByName) {
-                logger.info(String.format(
-                        "Skipping file %s. Hasn't changed since last scan. Use ScanMode.FORCE to force"
-                        , zippedJarFile.getAbsolutePath())
-                );
-                if (debug) debugCountOfSkippedJarFiles.incrementAndGet();
-                this.getAllScannedJars()
-                        .filter(j -> j.getJarFileHash().equals(hash))
-                        .findFirst()
-                        .ifPresent(res::add);
-                continue;
-            } else if (hasAlreadyScannedByName) {
-                Optional<File> unzippedDirectory = this.getAllScannedJars()
-                        .filter(j -> j.getZippedJarFile().getName().equals(zippedJarFile.getName()))
-                        .findFirst()
-                        .map(JarStateHolder::getUnzippedDirectory);
-
-                if (unzippedDirectory.isPresent()) {
-                    FileUtils.cleanDirectory(unzippedDirectory.get());
-                    if (!unzippedDirectory.get().delete()) {
-                        throw new IOException("Could not delete old unzipped directory. Check filesystem");
-                    }
-                }
-            }
-
-            Callable<JarStateHolder> unpackFuture = () -> {
-                if (debug) debugCountOfUnpackedJarFiles.incrementAndGet();
-
-                File innerZipperJarFile = new File(zippedJarFile.getAbsolutePath());
-                var holder = new JarStateHolder(innerZipperJarFile);
-                res.add(holder);
-                try (JarFile jarFile = new JarFile(innerZipperJarFile)) {
-                    String cleanJarFileName = innerZipperJarFile.getName().replace(".jar", "");
-                    File unzippedDirectory = unpackJarFileToDiskStorage(jarFile, cleanJarFileName);
-                    holder.setUnzippedDirectory(unzippedDirectory);
-                    holder.setJarFileHash(hash);
-                } catch (IOException e) {
-                    throw new JarUnpackingException("Failed to unpack Jar", e);
-                }
-                return holder;
-            };
-            completionService.submit(unpackFuture);
-            futuresSpawned++;
+            futuresSpawned += processJarFile(res, zippedJarFile);
         }
 
         int deltaReceived = futuresSpawned;
@@ -197,6 +142,74 @@ public class JarFileScanner {
         }
 
         return res;
+    }
+
+    private int processJarFile(HashSet<JarStateHolder> res, File zippedJarFile) throws IOException {
+        int futuresSpawned1 = 0;
+        if (!zippedJarFile.isFile()) return futuresSpawned1;
+
+        var hash = new FileHasher(zippedJarFile).hashMD5();
+
+        var hasAlreadyScannedByName = this.getAllScannedJars()
+                .anyMatch(j -> j.getZippedJarFile().getName().equals(zippedJarFile.getName()));
+
+        var hasAlreadyScannedByHash = this.getAllScannedJars()
+                .filter(j -> j.getJarFileHash() != null)
+                .anyMatch(j -> j.getJarFileHash().equals(hash));
+
+        if (hasAlreadyScannedByHash && hasAlreadyScannedByName) {
+            addAlreadyScannedJar(res, zippedJarFile, hash);
+            return futuresSpawned1;
+        } else if (hasAlreadyScannedByName) {
+            cleanUnzipDirectory(zippedJarFile);
+        }
+
+        Callable<JarStateHolder> unpackFuture = () -> unpackJarFuture(zippedJarFile, hash);
+        completionService.submit(unpackFuture);
+        futuresSpawned1++;
+        return futuresSpawned1;
+    }
+
+    private JarStateHolder unpackJarFuture(File zippedJarFile, String hash) throws JarUnpackingException {
+        if (debug) debugCountOfUnpackedJarFiles.incrementAndGet();
+
+        File innerZipperJarFile = new File(zippedJarFile.getAbsolutePath());
+        var holder = new JarStateHolder(innerZipperJarFile);
+        try (JarFile jarFile = new JarFile(innerZipperJarFile)) {
+            String cleanJarFileName = innerZipperJarFile.getName().replace(".jar", "");
+            File unzippedDirectory = unpackJarFileToDiskStorage(jarFile, cleanJarFileName);
+            holder.setUnzippedDirectory(unzippedDirectory);
+            holder.setJarFileHash(hash);
+        } catch (IOException e) {
+            throw new JarUnpackingException("Failed to unpack Jar", e);
+        }
+        return holder;
+    }
+
+    private void cleanUnzipDirectory(File zippedJarFile) throws IOException {
+        Optional<File> unzippedDirectory = this.getAllScannedJars()
+                .filter(j -> j.getZippedJarFile().getName().equals(zippedJarFile.getName()))
+                .findFirst()
+                .map(JarStateHolder::getUnzippedDirectory);
+
+        if (unzippedDirectory.isPresent()) {
+            FileUtils.cleanDirectory(unzippedDirectory.get());
+            if (!unzippedDirectory.get().delete()) {
+                throw new IOException("Could not delete old unzipped directory. Check filesystem");
+            }
+        }
+    }
+
+    private void addAlreadyScannedJar(HashSet<JarStateHolder> res, File zippedJarFile, String hash) {
+        logger.info(String.format(
+                "Skipping file %s. Hasn't changed since last scan. Use ScanMode.FORCE to force"
+                , zippedJarFile.getAbsolutePath())
+        );
+        if (debug) debugCountOfSkippedJarFiles.incrementAndGet();
+        this.getAllScannedJars()
+                .filter(j -> j.getJarFileHash().equals(hash))
+                .findFirst()
+                .ifPresent(res::add);
     }
 
     /**
@@ -259,14 +272,6 @@ public class JarFileScanner {
             throw new IllegalStateException("Hasn't scanned yet");
     }
 
-    private Set<JarStateHolder> getAllScannedJarForDirectory(File directory) {
-        var found = this.jarFileTmpMap.get(directory);
-
-        if (found == null) return Collections.emptySet();
-
-        return found;
-    }
-
     private Stream<JarStateHolder> getAllScannedJars() {
         return this.jarFileTmpMap
                 .values()
@@ -276,7 +281,7 @@ public class JarFileScanner {
 
     public enum ScanMode {
         SKIP_ALREADY_SCANNED,
-        FORCE;
+        FORCE
     }
 
     /**
@@ -291,10 +296,12 @@ public class JarFileScanner {
     // Not part of public API
     // Override this class in a test and call setDebug() to start recording these metrics
 
+    @SuppressWarnings("unused")
     void setDebug() {
         this.debug = true;
     }
 
+    @SuppressWarnings("unused")
     DebugHolder getDebugInfo() {
         return new DebugHolder(
                 debugCountOfUnpackedJarEntries.get(),
